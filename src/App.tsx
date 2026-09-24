@@ -2,7 +2,7 @@ import React from 'react';
 import { SupportProvider, useSupport } from './context/SupportContext';
 import { HeaderBar } from './components/common/HeaderBar';
 import { AndroidPhoneFrame } from './components/client/AndroidPhoneFrame';
-import { AdminDashboard } from './components/admin/AdminDashboard';
+import { AdminAuthGate } from './components/admin/AdminAuthGate';
 import { SplitView } from './components/split/SplitView';
 import { QrCodeModal } from './components/common/QrCodeModal';
 
@@ -22,7 +22,7 @@ const MainContent: React.FC = () => {
 
       {currentView === 'admin' && (
         <main className="flex-1 flex flex-col overflow-y-auto">
-          <AdminDashboard />
+          <AdminAuthGate />
         </main>
       )}
 

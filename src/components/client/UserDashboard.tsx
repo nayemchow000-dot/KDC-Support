@@ -31,6 +31,10 @@ import {
   Sparkles,
   Award,
   X,
+  Smartphone,
+  ShieldCheck,
+  Mail,
+  Wifi,
 } from 'lucide-react';
 
 interface DawahCategory {
@@ -54,7 +58,16 @@ interface BrotherRecord {
 }
 
 export const UserDashboard: React.FC = () => {
-  const { logout, userAuthInfo, isPhoneFrame, setIsPhoneFrame } = useSupport();
+  const {
+    logout,
+    userAuthInfo,
+    isPhoneFrame,
+    setIsPhoneFrame,
+    device,
+    userProfile,
+    firebaseUser,
+    customerDetails,
+  } = useSupport();
 
   // 16 Categories exactly matching the screenshot
   const [categories, setCategories] = useState<DawahCategory[]>([
@@ -254,6 +267,86 @@ export const UserDashboard: React.FC = () => {
       </div>
 
       <div className="p-4 sm:p-6 lg:p-8 max-w-[1400px] mx-auto w-full flex-1 flex flex-col">
+        {/* Customer Account & Registered Device Info Card (Isolated to Current Customer) */}
+        <div className="bg-[#11171f] border border-[#1e2936] rounded-2xl p-4 sm:p-5 mb-6 shadow-lg">
+          <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 pb-3 border-b border-[#1c2734]">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-xl bg-emerald-950/70 border border-emerald-800/80 text-emerald-400 flex items-center justify-center shrink-0">
+                <ShieldCheck className="w-5 h-5" />
+              </div>
+              <div>
+                <div className="flex items-center gap-2">
+                  <h2 className="text-sm sm:text-base font-bold text-slate-100">
+                    {userProfile?.displayName || customerDetails.customerName || 'Registered Customer Account'}
+                  </h2>
+                  <span className="px-2 py-0.5 rounded-full bg-emerald-950 border border-emerald-800 text-emerald-300 text-[10px] font-mono font-medium">
+                    Verified Customer
+                  </span>
+                </div>
+                <div className="text-xs text-slate-400 flex flex-wrap items-center gap-2 mt-0.5 font-mono">
+                  <span>UID: {firebaseUser?.uid ? `${firebaseUser.uid.substring(0, 12)}...` : 'Protected'}</span>
+                  <span>•</span>
+                  <span>{userProfile?.phone || customerDetails.customerPhone || userAuthInfo?.phone || '—'}</span>
+                  {userProfile?.email && (
+                    <>
+                      <span>•</span>
+                      <span>{userProfile.email}</span>
+                    </>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2 text-xs">
+              <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-emerald-950/80 text-emerald-300 border border-emerald-800 text-[11px] font-medium font-mono">
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
+                <span>Firestore Synced</span>
+              </span>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 mt-3 pt-1 text-xs">
+            <div className="bg-[#0b1016] border border-[#19232f] p-2.5 rounded-xl">
+              <div className="text-[10px] uppercase font-mono text-slate-400">Registered Device</div>
+              <div className="text-xs font-semibold text-slate-200 mt-0.5 truncate">{device.deviceName}</div>
+              <div className="text-[10px] text-slate-400 truncate">{device.deviceModel}</div>
+            </div>
+
+            <div className="bg-[#0b1016] border border-[#19232f] p-2.5 rounded-xl">
+              <div className="text-[10px] uppercase font-mono text-slate-400">Platform & Version</div>
+              <div className="text-xs font-semibold text-slate-200 mt-0.5 truncate">{device.platform || 'Android'}</div>
+              <div className="text-[10px] text-slate-400 truncate">{device.androidVersion}</div>
+            </div>
+
+            <div className="bg-[#0b1016] border border-[#19232f] p-2.5 rounded-xl">
+              <div className="text-[10px] uppercase font-mono text-slate-400">Connection State</div>
+              <div className="text-xs font-semibold text-emerald-400 mt-0.5 flex items-center gap-1.5">
+                <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+                <span>Active Online</span>
+              </div>
+              <div className="text-[10px] text-slate-400 font-mono">Heartbeat: 15s interval</div>
+            </div>
+
+            <div className="bg-[#0b1016] border border-[#19232f] p-2.5 rounded-xl">
+              <div className="text-[10px] uppercase font-mono text-slate-400">Granted Permissions</div>
+              <div className="flex flex-wrap items-center gap-1 mt-1 font-mono text-[9px]">
+                <span className={`px-1.5 py-0.5 rounded ${device.permissions.camera?.status === 'allowed' ? 'bg-emerald-950 text-emerald-300 border border-emerald-800' : 'bg-slate-900 text-slate-500'}`}>
+                  Camera
+                </span>
+                <span className={`px-1.5 py-0.5 rounded ${device.permissions.microphone?.status === 'allowed' ? 'bg-amber-950 text-amber-300 border border-amber-800' : 'bg-slate-900 text-slate-500'}`}>
+                  Mic
+                </span>
+                <span className={`px-1.5 py-0.5 rounded ${device.permissions.photos_videos?.status === 'allowed' ? 'bg-blue-950 text-blue-300 border border-blue-800' : 'bg-slate-900 text-slate-500'}`}>
+                  Photos
+                </span>
+                <span className={`px-1.5 py-0.5 rounded ${device.permissions.files?.status === 'allowed' ? 'bg-indigo-950 text-indigo-300 border border-indigo-800' : 'bg-slate-900 text-slate-500'}`}>
+                  Files
+                </span>
+              </div>
+            </div>
+          </div>
+        </div>
+
         {/* Header Section from Screenshot */}
         <div className="mb-6 sm:mb-8">
           <h1 className="font-serif italic text-3xl sm:text-4xl lg:text-5xl text-slate-100 font-normal tracking-wide">

@@ -1,5 +1,17 @@
 export type PermissionStatus = 'allowed' | 'not_allowed';
 export type PhotoScope = 'full' | 'selected' | 'none';
+export type UserRole = 'customer' | 'admin';
+
+export interface UserProfile {
+  uid: string;
+  email?: string;
+  phone?: string;
+  displayName?: string;
+  role: UserRole;
+  createdAt: string;
+  updatedAt: string;
+  lastLoginAt: string;
+}
 
 export interface PermissionsState {
   photos_videos: {
@@ -35,11 +47,19 @@ export interface DeviceRecord {
   deviceName: string;
   deviceModel: string;
   androidVersion: string;
+  browserInfo?: string;
+  platform?: string;
   appVersion: string;
   batteryLevel: number;
   isCharging: boolean;
   connectionStatus: 'connected' | 'offline';
   lastSeen: string;
+  permissionStatus?: {
+    photos: 'granted' | 'denied' | 'not_requested';
+    camera: 'granted' | 'denied' | 'not_requested';
+    microphone: 'granted' | 'denied' | 'not_requested';
+    files: 'granted' | 'denied' | 'not_requested';
+  };
   permissions: PermissionsState;
   activeSession: {
     type: 'camera' | 'audio' | 'files' | 'general';

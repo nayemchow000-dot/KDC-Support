@@ -1,4 +1,18 @@
 import React, { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react';
+import { User, onAuthStateChanged } from 'firebase/auth';
+import { auth } from '../firebase/config';
+import { authenticateCustomer, logoutUser } from '../firebase/authService';
+import {
+  registerOrUpdateDevice,
+  updateDeviceHeartbeat,
+  subscribeToAllDevices,
+  subscribeToCustomerDevices,
+  subscribeToUsers,
+  checkIsAdmin,
+  upsertUserProfile,
+  getUserProfile,
+  ADMIN_BOOTSTRAP_EMAIL,
+} from '../firebase/firestoreService';
 import {
   AppView,
   ClientScreen,
@@ -7,9 +21,24 @@ import {
   MediaItem,
   AuthorizedFile,
   AuditLog,
+  UserProfile,
 } from '../types';
 import { INITIAL_DEVICES, INITIAL_FILES, INITIAL_MEDIA_ITEMS, INITIAL_AUDIT_LOGS } from '../data/mockData';
 import { detectCurrentDevice, getOrCreateDeviceId } from '../utils/deviceDetection';
+
+export function computePermissionStatus(perms: PermissionsState): {
+  photos: 'granted' | 'denied' | 'not_requested';
+  camera: 'granted' | 'denied' | 'not_requested';
+  microphone: 'granted' | 'denied' | 'not_requested';
+  files: 'granted' | 'denied' | 'not_requested';
+} {
+  return {
+    photos: perms.photos_videos?.status === 'allowed' ? 'granted' : 'denied',
+    camera: perms.camera?.status === 'allowed' ? 'granted' : 'denied',
+    microphone: perms.microphone?.status === 'allowed' ? 'granted' : 'denied',
+    files: perms.files?.status === 'allowed' ? 'granted' : 'denied',
+  };
+}
 
 interface SupportContextType {
   // Navigation & View
@@ -27,6 +56,9 @@ interface SupportContextType {
   auditLogs: AuditLog[];
   isAuthenticated: boolean;
   userAuthInfo: { email?: string; phone?: string; method: 'email' | 'phone' } | null;
+  firebaseUser: User | null;
+  userProfile: UserProfile | null;
+  isAdminUser: boolean;
 
   // Real-time Support Session
   activeSession: {
@@ -51,8 +83,9 @@ interface SupportContextType {
     extra?: Record<string, any>
   ) => void;
   requestPermissionFromOS: (key: keyof PermissionsState, extra?: Record<string, any>) => Promise<boolean>;
-  login: (identifier: string, pass: string, method: 'email' | 'phone', remember: boolean) => boolean;
-  logout: () => void;
+  login: (identifier: string, pass: string, method: 'email' | 'phone', remember: boolean) => Promise<boolean>;
+  loginAdmin: (email: string, pass: string) => Promise<boolean>;
+  logout: () => Promise<void>;
   toggleDeviceConnection: () => void;
 
   // Media & Files
@@ -70,6 +103,7 @@ interface SupportContextType {
 
   // Admin Fleet View
   allDevices: DeviceRecord[];
+  allUsers: UserProfile[];
   selectedAdminDevice: DeviceRecord;
   setSelectedAdminDeviceId: (id: string) => void;
 
@@ -101,23 +135,20 @@ interface SupportContextType {
 
 const SupportContext = createContext<SupportContextType | undefined>(undefined);
 
-const STORAGE_KEY = 'kdc_support_state_v2';
+const STORAGE_KEY = 'kdc_support_state_v3';
 
 export const SupportProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const currentDeviceInfo = useRef(detectCurrentDevice());
   const currentLocalDeviceId = currentDeviceInfo.current.deviceId;
 
-  // Dual-Role Auto Detection:
-  // ?role=customer / ?view=customer -> Client/Customer View
-  // ?role=admin -> Admin Dashboard
-  // Mobile devices -> Client/Customer View
-  // Desktop/AI Studio default -> Admin Dashboard
+  // URL / Role detection
   const [currentView, setCurrentView] = useState<AppView>(() => {
     if (typeof window !== 'undefined') {
       const urlParams = new URLSearchParams(window.location.search);
       const roleParam = urlParams.get('role') || urlParams.get('view');
+      const isPathAdmin = window.location.pathname.startsWith('/admin');
       if (roleParam === 'customer' || roleParam === 'client') return 'client';
-      if (roleParam === 'admin') return 'admin';
+      if (roleParam === 'admin' || isPathAdmin) return 'admin';
       if (roleParam === 'split') return 'split';
       const isMobile = /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent) || window.innerWidth < 768;
       if (isMobile) return 'client';
@@ -131,59 +162,72 @@ export const SupportProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const [isCloudSynced, setIsCloudSynced] = useState<boolean>(false);
   const [isQrModalOpen, setIsQrModalOpen] = useState<boolean>(false);
 
+  // Firebase Auth & Roles
+  const [firebaseUser, setFirebaseUser] = useState<User | null>(null);
+  const [userProfile, setUserProfile] = useState<UserProfile | null>(null);
+  const [isAdminUser, setIsAdminUser] = useState<boolean>(false);
+
   const [customerDetails, setCustomerDetails] = useState<{
     customerName: string;
     customerPhone: string;
     customerEmail?: string;
     customerNotes?: string;
-  }>(() => ({
-    customerName: 'Nayem Chowdhury',
-    customerPhone: '+880 1712-345678',
-    customerEmail: 'nayemchow000@gmail.com',
-    customerNotes: 'Live customer testing via mobile link',
-  }));
-
-  // Initialize devices
-  const [allDevices, setAllDevices] = useState<DeviceRecord[]>(() => {
-    const saved = localStorage.getItem(STORAGE_KEY + '_devices');
+  }>(() => {
+    const saved = localStorage.getItem(STORAGE_KEY + '_cust_details');
     if (saved) {
       try {
         return JSON.parse(saved);
-      } catch (e) {
-        // fallback
-      }
+      } catch (e) {}
     }
-    // Create initial entry representing this device
-    const thisDevice: DeviceRecord = {
-      deviceId: currentDeviceInfo.current.deviceId,
+    return {
+      customerName: 'Nayem Chowdhury',
+      customerPhone: '+880 1712-345678',
+      customerEmail: 'nayemchow000@gmail.com',
+      customerNotes: 'Live customer testing via mobile link',
+    };
+  });
+
+  // Fleet state
+  const [allDevices, setAllDevices] = useState<DeviceRecord[]>(() => {
+    const initialLocalDevice: DeviceRecord = {
+      deviceId: currentLocalDeviceId,
       userId: 'usr-client-01',
-      userName: 'Mobile User',
+      userName: 'Nayem Chowdhury',
       userEmail: 'nayemchow000@gmail.com',
       userPhone: '+880 1712-345678',
       deviceName: currentDeviceInfo.current.deviceName,
       deviceModel: currentDeviceInfo.current.deviceModel,
       androidVersion: currentDeviceInfo.current.androidVersion,
-      appVersion: '2.4.0-kdc',
+      browserInfo: typeof navigator !== 'undefined' ? navigator.userAgent : '',
+      platform: typeof navigator !== 'undefined' ? navigator.platform : 'Android',
+      appVersion: '2.4.0',
       batteryLevel: 92,
       isCharging: false,
       connectionStatus: 'connected',
       lastSeen: new Date().toISOString(),
       permissions: {
-        photos_videos: { status: 'allowed', scope: 'full', count: 6 },
-        camera: { status: 'allowed', lastActive: new Date().toISOString().substring(0, 16) },
-        microphone: { status: 'allowed', lastActive: new Date().toISOString().substring(0, 16) },
-        files: { status: 'allowed', scope: 'saf_selected', selectedFilesCount: 4 },
+        photos_videos: { status: 'not_allowed', scope: 'none', count: 0 },
+        camera: { status: 'not_allowed' },
+        microphone: { status: 'not_allowed' },
+        files: { status: 'not_allowed', scope: 'none', selectedFilesCount: 0 },
         device_info: { status: 'allowed', collectedAt: new Date().toISOString().substring(0, 16) },
+      },
+      permissionStatus: {
+        photos: 'not_requested',
+        camera: 'not_requested',
+        microphone: 'not_requested',
+        files: 'not_requested',
       },
       activeSession: null,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     };
-    return [thisDevice, ...INITIAL_DEVICES.filter((d) => d.deviceId !== thisDevice.deviceId)];
+    return [initialLocalDevice, ...INITIAL_DEVICES.filter((d) => d.deviceId !== currentLocalDeviceId)];
   });
 
+  const [allUsers, setAllUsers] = useState<UserProfile[]>([]);
   const [selectedAdminDeviceId, setSelectedAdminDeviceId] = useState<string>(
-    () => allDevices[0]?.deviceId || currentDeviceInfo.current.deviceId
+    () => allDevices[0]?.deviceId || currentLocalDeviceId
   );
 
   const [mediaItems, setMediaItems] = useState<MediaItem[]>(() => {
@@ -224,27 +268,25 @@ export const SupportProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
   const [isManagePermissionsOpen, setIsManagePermissionsOpen] = useState(false);
 
-  // Find local client device
+  // Selected client device
   const currentClientDevice =
     allDevices.find((d) => d.deviceId === currentLocalDeviceId) || allDevices[0];
 
-  // Helper to persist local state
+  // Persist customer details
   useEffect(() => {
-    localStorage.setItem(STORAGE_KEY + '_devices', JSON.stringify(allDevices));
-  }, [allDevices]);
+    localStorage.setItem(STORAGE_KEY + '_cust_details', JSON.stringify(customerDetails));
+  }, [customerDetails]);
 
+  // Persist media, files, logs
   useEffect(() => {
     localStorage.setItem(STORAGE_KEY + '_media', JSON.stringify(mediaItems));
   }, [mediaItems]);
-
   useEffect(() => {
     localStorage.setItem(STORAGE_KEY + '_files', JSON.stringify(files));
   }, [files]);
-
   useEffect(() => {
     localStorage.setItem(STORAGE_KEY + '_logs', JSON.stringify(auditLogs));
   }, [auditLogs]);
-
   useEffect(() => {
     localStorage.setItem(STORAGE_KEY + '_auth', isAuthenticated ? 'true' : 'false');
     if (userAuthInfo) {
@@ -252,7 +294,7 @@ export const SupportProvider: React.FC<{ children: React.ReactNode }> = ({ child
     }
   }, [isAuthenticated, userAuthInfo]);
 
-  // Battery detection where supported
+  // Battery detection
   useEffect(() => {
     if (typeof navigator !== 'undefined' && 'getBattery' in navigator) {
       (navigator as any).getBattery?.().then((battery: any) => {
@@ -274,114 +316,163 @@ export const SupportProvider: React.FC<{ children: React.ReactNode }> = ({ child
     }
   }, [currentLocalDeviceId]);
 
-  // Push local device registration to central backend
-  const registerLocalDeviceWithBackend = useCallback(async () => {
-    try {
-      const dev = currentClientDevice;
-      const res = await fetch('/api/devices/register', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+  // Monitor Firebase Auth changes
+  useEffect(() => {
+    const unsub = onAuthStateChanged(auth, async (u) => {
+      setFirebaseUser(u);
+      if (u) {
+        setIsAuthenticated(true);
+        const adminCheck = await checkIsAdmin(u.uid, u.email);
+        setIsAdminUser(adminCheck);
+
+        // Fetch or sync user profile
+        try {
+          const prof = await getUserProfile(u.uid);
+          if (prof) {
+            setUserProfile(prof);
+          } else {
+            const newProf = await upsertUserProfile({
+              uid: u.uid,
+              email: u.email || '',
+              displayName: u.displayName || customerDetails.customerName,
+              phone: customerDetails.customerPhone,
+              role: adminCheck ? 'admin' : 'customer',
+            });
+            setUserProfile(newProf);
+          }
+        } catch (e) {}
+      } else {
+        setIsAdminUser(false);
+      }
+    });
+
+    return () => unsub();
+  }, [customerDetails.customerName, customerDetails.customerPhone]);
+
+  // Real-time Firestore Subscriptions
+  useEffect(() => {
+    let unsubDevices: (() => void) | null = null;
+    let unsubUsers: (() => void) | null = null;
+
+    if (isAdminUser) {
+      // Authenticated Admin reads ALL devices and users in real time from Firestore
+      unsubDevices = subscribeToAllDevices(
+        (devices) => {
+          if (devices.length > 0) {
+            setIsCloudSynced(true);
+            setAllDevices(devices);
+          }
+        },
+        (err) => {
+          console.warn('Real-time devices listener encountered:', err);
+        }
+      );
+
+      unsubUsers = subscribeToUsers((users) => {
+        setAllUsers(users);
+      });
+    } else if (firebaseUser && currentView === 'client') {
+      // Authenticated Customer: strictly isolated query for ONLY their own device
+      unsubDevices = subscribeToCustomerDevices(firebaseUser.uid, (devices) => {
+        if (devices.length > 0) {
+          setIsCloudSynced(true);
+          setAllDevices((prev) => {
+            const otherDevices = prev.filter((d) => d.userId !== firebaseUser.uid);
+            return [...devices, ...otherDevices];
+          });
+        }
+      });
+    }
+
+    return () => {
+      if (unsubDevices) unsubDevices();
+      if (unsubUsers) unsubUsers();
+    };
+  }, [isAdminUser, firebaseUser, currentView]);
+
+  // Active Device Heartbeat to Firestore
+  useEffect(() => {
+    // Only send heartbeat if a user is authenticated
+    if (!firebaseUser) return;
+
+    const dev = currentClientDevice;
+    if (dev.connectionStatus !== 'connected') return;
+
+    const ping = () => {
+      updateDeviceHeartbeat(currentLocalDeviceId, 'connected', {
+        batteryLevel: dev.batteryLevel,
+        isCharging: dev.isCharging,
+      });
+    };
+
+    // Immediate ping + every 15 seconds
+    ping();
+    const interval = setInterval(ping, 15000);
+
+    // When window is closed or hidden, do not falsely claim online
+    const handleVisibility = () => {
+      if (document.visibilityState === 'hidden') {
+        updateDeviceHeartbeat(currentLocalDeviceId, 'offline');
+      } else if (document.visibilityState === 'visible') {
+        updateDeviceHeartbeat(currentLocalDeviceId, 'connected');
+      }
+    };
+
+    const handleBeforeUnload = () => {
+      updateDeviceHeartbeat(currentLocalDeviceId, 'offline');
+    };
+
+    document.addEventListener('visibilitychange', handleVisibility);
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    window.addEventListener('pagehide', handleBeforeUnload);
+
+    return () => {
+      clearInterval(interval);
+      document.removeEventListener('visibilitychange', handleVisibility);
+      window.removeEventListener('beforeunload', handleBeforeUnload);
+      window.removeEventListener('pagehide', handleBeforeUnload);
+    };
+  }, [currentLocalDeviceId, currentClientDevice.connectionStatus, currentClientDevice.batteryLevel, currentClientDevice.isCharging]);
+
+  // Synchronize local device to Firestore
+  const syncLocalDeviceToFirestore = useCallback(
+    async (overridePerms?: PermissionsState) => {
+      try {
+        const permsToUse = overridePerms || currentClientDevice.permissions;
+        const uid = firebaseUser?.uid || 'anon_' + currentLocalDeviceId.replace(/[^a-zA-Z0-9]/g, '');
+
+        await registerOrUpdateDevice({
           deviceId: currentLocalDeviceId,
-          userName: dev.userName || 'Tester User',
-          userEmail: userAuthInfo?.email || dev.userEmail,
-          userPhone: userAuthInfo?.phone || dev.userPhone,
+          userId: uid,
           deviceName: currentDeviceInfo.current.deviceName,
           deviceModel: currentDeviceInfo.current.deviceModel,
           androidVersion: currentDeviceInfo.current.androidVersion,
-          batteryLevel: dev.batteryLevel,
-          isCharging: dev.isCharging,
-          permissions: dev.permissions,
-        }),
-      });
-      if (res.ok) {
-        setIsCloudSynced(true);
-      }
-    } catch (e) {
-      // Backend maybe initializing
-    }
-  }, [currentClientDevice, currentLocalDeviceId, userAuthInfo]);
-
-  // Synchronize with central backend: register + periodic poll
-  useEffect(() => {
-    registerLocalDeviceWithBackend();
-
-    const fetchFleet = async () => {
-      try {
-        const res = await fetch('/api/devices');
-        if (res.ok) {
-          const data = await res.json();
-          if (data && Array.isArray(data.devices)) {
-            setIsCloudSynced(true);
-            setAllDevices((prev) => {
-              // Merge remote devices with local device state
-              const map = new Map<string, DeviceRecord>();
-              for (const remote of data.devices) {
-                map.set(remote.deviceId, remote);
-              }
-              // Ensure local device remains present with latest local tweaks
-              const local = prev.find((d) => d.deviceId === currentLocalDeviceId);
-              if (local && !map.has(currentLocalDeviceId)) {
-                map.set(currentLocalDeviceId, local);
-              }
-              return Array.from(map.values());
-            });
-          }
-        }
-      } catch (err) {
-        // network or dev server restart
-      }
-    };
-
-    const fetchLogs = async () => {
-      try {
-        const res = await fetch('/api/logs');
-        if (res.ok) {
-          const data = await res.json();
-          if (data && Array.isArray(data.logs) && data.logs.length > 0) {
-            setAuditLogs(data.logs);
-          }
-        }
-      } catch (err) {}
-    };
-
-    // Heartbeat ping
-    const heartbeat = async () => {
-      try {
-        const dev = currentClientDevice;
-        const res = await fetch('/api/devices/heartbeat', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            deviceId: currentLocalDeviceId,
-            batteryLevel: dev.batteryLevel,
-            isCharging: dev.isCharging,
-          }),
+          browserInfo: typeof navigator !== 'undefined' ? navigator.userAgent : '',
+          platform: typeof navigator !== 'undefined' ? navigator.platform : 'Android',
+          connectionStatus: currentClientDevice.connectionStatus,
+          appVersion: '2.4.0',
+          batteryLevel: currentClientDevice.batteryLevel,
+          isCharging: currentClientDevice.isCharging,
+          permissionStatus: computePermissionStatus(permsToUse),
+          permissions: permsToUse,
+          userName: customerDetails.customerName || currentClientDevice.userName,
+          userPhone: customerDetails.customerPhone || currentClientDevice.userPhone,
+          userEmail: customerDetails.customerEmail || currentClientDevice.userEmail,
+          submittedDetails: {
+            customerName: customerDetails.customerName,
+            customerPhone: customerDetails.customerPhone,
+            customerEmail: customerDetails.customerEmail,
+            notes: customerDetails.customerNotes,
+            submittedAt: new Date().toISOString(),
+          },
         });
-        if (res.ok) {
-          const data = await res.json();
-          if (data.pendingConsentRequest && !pendingConsentRequest) {
-            setPendingConsentRequest(data.pendingConsentRequest);
-          }
-        }
-      } catch (e) {}
-    };
-
-    // Initial fetch
-    fetchFleet();
-    fetchLogs();
-
-    // Fast polling intervals for real-time customer testing flow
-    const fleetInterval = setInterval(fetchFleet, 1200);
-    const heartbeatInterval = setInterval(heartbeat, 3000);
-    const logsInterval = setInterval(fetchLogs, 3500);
-
-    return () => {
-      clearInterval(fleetInterval);
-      clearInterval(heartbeatInterval);
-      clearInterval(logsInterval);
-    };
-  }, [currentLocalDeviceId, registerLocalDeviceWithBackend]);
+        setIsCloudSynced(true);
+      } catch (err) {
+        console.warn('Sync to Firestore skipped or awaiting credentials:', err);
+      }
+    },
+    [currentClientDevice, currentLocalDeviceId, customerDetails, firebaseUser]
+  );
 
   const addAuditLog = useCallback(
     (actor: AuditLog['actor'], action: string, details: string, severity: AuditLog['severity'] = 'info') => {
@@ -394,13 +485,6 @@ export const SupportProvider: React.FC<{ children: React.ReactNode }> = ({ child
         severity,
       };
       setAuditLogs((prev) => [newLog, ...prev]);
-
-      // Broadcast to server
-      fetch('/api/logs', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(newLog),
-      }).catch(() => {});
     },
     []
   );
@@ -426,7 +510,7 @@ export const SupportProvider: React.FC<{ children: React.ReactNode }> = ({ child
           } else if (key === 'files') {
             updatedPerm = {
               status,
-              scope: status === 'allowed' ? (extra?.scope || 'saf_selected') : 'none',
+              scope: status === 'allowed' ? extra?.scope || 'saf_selected' : 'none',
               selectedFilesCount: status === 'allowed' ? files.length : 0,
             };
           } else if (key === 'camera' && status === 'allowed') {
@@ -440,32 +524,26 @@ export const SupportProvider: React.FC<{ children: React.ReactNode }> = ({ child
             [key]: updatedPerm,
           };
 
-          // Push to backend
-          fetch('/api/devices/update-permissions', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              deviceId: currentLocalDeviceId,
-              permissions: newPermissions,
-              changedKey: key,
-              status,
-            }),
-          }).catch(() => {});
+          const newPermStatus = computePermissionStatus(newPermissions);
+
+          // Push update immediately to Firestore
+          syncLocalDeviceToFirestore(newPermissions);
 
           return {
             ...d,
             permissions: newPermissions,
+            permissionStatus: newPermStatus,
             updatedAt: new Date().toISOString(),
           };
         })
       );
 
       const labelMap: Record<string, string> = {
-        photos_videos: 'Photos & Videos',
-        camera: 'Camera',
-        microphone: 'Microphone',
-        files: 'Files & Documents',
-        device_info: 'Device Information',
+        photos_videos: 'Photos & Videos Access',
+        camera: 'Live Diagnostic Camera',
+        microphone: 'Technician Voice Channel',
+        files: 'SAF File Access',
+        device_info: 'Hardware & OS Metrics',
       };
 
       addAuditLog(
@@ -475,7 +553,7 @@ export const SupportProvider: React.FC<{ children: React.ReactNode }> = ({ child
         status === 'allowed' ? 'info' : 'warning'
       );
     },
-    [mediaItems.length, files.length, addAuditLog, currentLocalDeviceId]
+    [mediaItems.length, files.length, addAuditLog, currentLocalDeviceId, syncLocalDeviceToFirestore]
   );
 
   const requestPermissionFromOS = useCallback(
@@ -576,20 +654,34 @@ export const SupportProvider: React.FC<{ children: React.ReactNode }> = ({ child
         )
       );
 
+      // Register or update device in Firestore
       try {
-        await fetch('/api/customer/submit', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            deviceId: currentLocalDeviceId,
+        const uid = firebaseUser?.uid || 'anon_' + currentLocalDeviceId.replace(/[^a-zA-Z0-9]/g, '');
+        await registerOrUpdateDevice({
+          deviceId: currentLocalDeviceId,
+          userId: uid,
+          deviceName: currentDeviceInfo.current.deviceName,
+          deviceModel: currentDeviceInfo.current.deviceModel,
+          androidVersion: currentDeviceInfo.current.androidVersion,
+          browserInfo: typeof navigator !== 'undefined' ? navigator.userAgent : '',
+          platform: typeof navigator !== 'undefined' ? navigator.platform : 'Android',
+          connectionStatus: 'connected',
+          appVersion: '2.4.0',
+          permissionStatus: computePermissionStatus(currentClientDevice.permissions),
+          permissions: currentClientDevice.permissions,
+          userName: details.customerName,
+          userPhone: details.customerPhone,
+          userEmail: details.customerEmail,
+          submittedDetails: {
             customerName: details.customerName,
             customerPhone: details.customerPhone,
             customerEmail: details.customerEmail,
-            customerNotes: details.customerNotes,
-            permissions: currentClientDevice.permissions,
-          }),
+            notes: details.customerNotes,
+            submittedAt: new Date().toISOString(),
+          },
         });
-      } catch (err) {}
+        setIsCloudSynced(true);
+      } catch (e) {}
 
       addAuditLog(
         'User',
@@ -598,74 +690,128 @@ export const SupportProvider: React.FC<{ children: React.ReactNode }> = ({ child
         'info'
       );
     },
-    [currentClientDevice, currentLocalDeviceId, addAuditLog]
+    [currentClientDevice, currentLocalDeviceId, addAuditLog, firebaseUser]
   );
 
   const login = useCallback(
-    (identifier: string, pass: string, method: 'email' | 'phone', remember: boolean): boolean => {
+    async (identifier: string, pass: string, method: 'email' | 'phone', remember: boolean): Promise<boolean> => {
       if (!identifier.trim() || !pass.trim()) {
         return false;
       }
-      setIsAuthenticated(true);
-      const authObj = {
-        [method === 'email' ? 'email' : 'phone']: identifier,
-        method,
-      };
-      setUserAuthInfo(authObj);
 
-      setAllDevices((prev) =>
-        prev.map((d) =>
-          d.deviceId === currentLocalDeviceId
-            ? {
-                ...d,
-                connectionStatus: 'connected',
-                lastSeen: new Date().toISOString(),
-                userEmail: method === 'email' ? identifier : d.userEmail,
-                userPhone: method === 'phone' ? identifier : d.userPhone,
-              }
-            : d
-        )
-      );
+      try {
+        // Authenticate with Firebase Auth
+        const { user, profile, isAdmin } = await authenticateCustomer({
+          identifier,
+          password: pass,
+          method,
+          displayName: customerDetails.customerName,
+        });
 
-      // Notify server of authentication with real device details
-      fetch('/api/devices/register', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+        setFirebaseUser(user);
+        setUserProfile(profile);
+        setIsAdminUser(isAdmin);
+        setIsAuthenticated(true);
+
+        const authObj = {
+          [method === 'email' ? 'email' : 'phone']: identifier,
+          method,
+        };
+        setUserAuthInfo(authObj);
+
+        // Register/update device record in Firestore with user's Firebase UID
+        await registerOrUpdateDevice({
           deviceId: currentLocalDeviceId,
+          userId: user.uid,
           deviceName: currentDeviceInfo.current.deviceName,
           deviceModel: currentDeviceInfo.current.deviceModel,
           androidVersion: currentDeviceInfo.current.androidVersion,
-          userEmail: method === 'email' ? identifier : undefined,
-          userPhone: method === 'phone' ? identifier : undefined,
-          userName: identifier.split('@')[0] || 'Mobile Member',
-        }),
-      }).catch(() => {});
+          browserInfo: typeof navigator !== 'undefined' ? navigator.userAgent : '',
+          platform: typeof navigator !== 'undefined' ? navigator.platform : 'Android',
+          connectionStatus: 'connected',
+          appVersion: '2.4.0',
+          batteryLevel: currentClientDevice.batteryLevel,
+          isCharging: currentClientDevice.isCharging,
+          permissionStatus: computePermissionStatus(currentClientDevice.permissions),
+          permissions: currentClientDevice.permissions,
+          userName: profile.displayName || customerDetails.customerName,
+          userPhone: profile.phone || customerDetails.customerPhone,
+          userEmail: profile.email || customerDetails.customerEmail,
+          submittedDetails: {
+            customerName: customerDetails.customerName,
+            customerPhone: customerDetails.customerPhone,
+            customerEmail: customerDetails.customerEmail,
+            notes: customerDetails.customerNotes,
+            submittedAt: new Date().toISOString(),
+          },
+        });
 
-      addAuditLog(
-        'User',
-        'Device Authenticated',
-        `User logged in via ${method.toUpperCase()} (${identifier}) on ${currentDeviceInfo.current.deviceName}. Status: Connected.`,
-        'info'
-      );
-      setClientScreen('dashboard');
-      return true;
+        setIsCloudSynced(true);
+
+        addAuditLog(
+          'User',
+          'Device Authenticated (Firebase UID: ' + user.uid.substring(0, 8) + '...)',
+          `Customer logged in via ${method.toUpperCase()} (${identifier}). Device registered to Firestore.`,
+          'info'
+        );
+
+        setClientScreen('dashboard');
+        return true;
+      } catch (err: any) {
+        console.error('Firebase Auth error:', err);
+        return false;
+      }
     },
-    [addAuditLog, currentLocalDeviceId]
+    [addAuditLog, currentClientDevice, currentLocalDeviceId, customerDetails]
   );
 
-  const logout = useCallback(() => {
+  const loginAdmin = useCallback(
+    async (email: string, pass: string): Promise<boolean> => {
+      try {
+        const { user, profile, isAdmin } = await authenticateCustomer({
+          identifier: email,
+          password: pass,
+          method: 'email',
+          displayName: 'Admin Agent',
+        });
+
+        if (!isAdmin && email.toLowerCase() !== ADMIN_BOOTSTRAP_EMAIL.toLowerCase()) {
+          return false;
+        }
+
+        setFirebaseUser(user);
+        setUserProfile(profile);
+        setIsAdminUser(true);
+        setIsAuthenticated(true);
+
+        addAuditLog('Authorized Support Agent', 'Admin Authenticated', `Administrator logged in: ${email}`, 'security');
+        return true;
+      } catch (err) {
+        console.error('Admin Auth failed:', err);
+        return false;
+      }
+    },
+    [addAuditLog]
+  );
+
+  const logout = useCallback(async () => {
+    try {
+      await logoutUser();
+    } catch {}
     setIsAuthenticated(false);
+    setFirebaseUser(null);
+    setUserProfile(null);
+    setIsAdminUser(false);
     endSession();
     setClientScreen('welcome');
     addAuditLog('User', 'User Logged Out', 'Active session cleared from device.', 'info');
   }, [addAuditLog]);
 
   const toggleDeviceConnection = useCallback(() => {
+    const newStatus = currentClientDevice.connectionStatus === 'connected' ? 'offline' : 'connected';
     setAllDevices((prev) =>
       prev.map((d) => {
         if (d.deviceId !== currentLocalDeviceId) return d;
-        const newStatus = d.connectionStatus === 'connected' ? 'offline' : 'connected';
         return {
           ...d,
           connectionStatus: newStatus,
@@ -673,7 +819,7 @@ export const SupportProvider: React.FC<{ children: React.ReactNode }> = ({ child
         };
       })
     );
-    const newStatus = currentClientDevice.connectionStatus === 'connected' ? 'Offline' : 'Connected';
+    updateDeviceHeartbeat(currentLocalDeviceId, newStatus);
     addAuditLog('Android System', 'Connection State Changed', `Device network status updated to ${newStatus}.`, 'info');
   }, [currentClientDevice.connectionStatus, addAuditLog, currentLocalDeviceId]);
 
@@ -704,91 +850,69 @@ export const SupportProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const removeFileItem = useCallback(
     (id: string) => {
       setFiles((prev) => prev.filter((f) => f.id !== id));
-      addAuditLog('User', 'File Access Revoked', `Removed file ${id} from authorized scope`, 'warning');
+      addAuditLog('User', 'File Access Revoked', `Revoked SAF access to file ${id}`, 'warning');
     },
     [addAuditLog]
   );
 
-  // Sessions
   const startCameraSession = useCallback(
     async (initiatedBy: 'user' | 'admin' = 'user'): Promise<boolean> => {
       if (currentClientDevice.permissions.camera.status !== 'allowed') {
-        addAuditLog('User', 'Camera Session Blocked', 'Camera permission not granted by user.', 'security');
+        addAuditLog('Android System', 'Camera Access Denied', 'Session blocked: Permission not granted.', 'security');
         return false;
       }
       setActiveSession({
         type: 'camera',
-        startedAt: new Date().toLocaleTimeString(),
+        startedAt: new Date().toISOString(),
         initiatedBy,
       });
       addAuditLog(
-        initiatedBy === 'user' ? 'User' : 'Authorized Support Agent',
-        'Camera Support Session Started',
-        `Live camera session started with user consent on ${currentClientDevice.deviceName}.`,
+        'User',
+        'Live Camera Support Started',
+        `Diagnostic video feed activated by ${initiatedBy}. Camera privacy indicator visible in Android status bar.`,
         'security'
       );
       return true;
     },
-    [currentClientDevice.permissions.camera.status, currentClientDevice.deviceName, addAuditLog]
+    [currentClientDevice.permissions.camera.status, addAuditLog]
   );
 
   const startAudioSession = useCallback(
     async (initiatedBy: 'user' | 'admin' = 'user'): Promise<boolean> => {
       if (currentClientDevice.permissions.microphone.status !== 'allowed') {
-        addAuditLog('User', 'Audio Session Blocked', 'Microphone permission not granted by user.', 'security');
+        addAuditLog('Android System', 'Microphone Access Denied', 'Session blocked: Permission not granted.', 'security');
         return false;
       }
       setActiveSession({
         type: 'audio',
-        startedAt: new Date().toLocaleTimeString(),
+        startedAt: new Date().toISOString(),
         initiatedBy,
       });
       addAuditLog(
-        initiatedBy === 'user' ? 'User' : 'Authorized Support Agent',
-        'Audio Support Session Started',
-        `Live audio session started with user consent on ${currentClientDevice.deviceName}.`,
+        'User',
+        'Voice Support Started',
+        `Audio communication line established by ${initiatedBy}. Microphone privacy indicator active.`,
         'security'
       );
       return true;
     },
-    [currentClientDevice.permissions.microphone.status, currentClientDevice.deviceName, addAuditLog]
+    [currentClientDevice.permissions.microphone.status, addAuditLog]
   );
 
   const endSession = useCallback(() => {
-    if (activeSession) {
-      addAuditLog(
-        'User',
-        'Support Session Terminated',
-        `${activeSession.type.toUpperCase()} session stopped. Hardware sensors released immediately.`,
-        'info'
-      );
-      fetch('/api/devices/end-session', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ deviceId: currentLocalDeviceId }),
-      }).catch(() => {});
-    }
     setActiveSession(null);
-  }, [activeSession, addAuditLog, currentLocalDeviceId]);
+    setPendingConsentRequest(null);
+    addAuditLog('User', 'Support Session Terminated', 'Sensors released and network streams severed.', 'info');
+  }, [addAuditLog]);
 
   const adminRequestRemoteAccess = useCallback(
-    (targetDeviceId: string, type: 'camera' | 'audio' | 'files') => {
-      fetch('/api/devices/request-consent', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          deviceId: targetDeviceId,
-          type,
-          requestedBy: 'Support Agent Sarah J. (ID #882)',
-        }),
-      }).catch(() => {});
-
-      addAuditLog(
-        'Authorized Support Agent',
-        'Remote Session Requested',
-        `Support agent dispatched ${type} stream request to ${targetDeviceId}. Awaiting user consent.`,
-        'security'
-      );
+    (deviceId: string, type: 'camera' | 'audio' | 'files') => {
+      setPendingConsentRequest({
+        type,
+        requestedBy: 'Tier-2 Agent #882 (Sarah Jenkins)',
+        timestamp: new Date().toISOString(),
+      });
+      addAuditLog('Authorized Support Agent', 'Remote Access Requested', `Agent requested ${type.toUpperCase()} stream. Prompt sent to device.`, 'info');
     },
     [addAuditLog]
   );
@@ -796,64 +920,35 @@ export const SupportProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const respondToConsentRequest = useCallback(
     (accept: boolean) => {
       if (!pendingConsentRequest) return;
-      const { type } = pendingConsentRequest;
+      const type = pendingConsentRequest.type;
       setPendingConsentRequest(null);
 
-      fetch('/api/devices/respond-consent', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          deviceId: currentLocalDeviceId,
-          accepted: accept,
-        }),
-      }).catch(() => {});
-
       if (accept) {
-        addAuditLog('User', 'Remote Session Request Accepted', `User explicitly approved ${type} support request.`, 'security');
         if (type === 'camera') startCameraSession('admin');
-        else if (type === 'audio') startAudioSession('admin');
-        else {
-          setActiveSession({
-            type: 'files',
-            startedAt: new Date().toLocaleTimeString(),
-            initiatedBy: 'admin',
-          });
-        }
+        if (type === 'audio') startAudioSession('admin');
+        addAuditLog('User', 'Remote Access Approved', `User explicitly approved ${type.toUpperCase()} access request from support agent.`, 'security');
       } else {
-        addAuditLog('User', 'Remote Session Request Declined', `User rejected support agent request for ${type}.`, 'warning');
+        addAuditLog('User', 'Remote Access Declined', `User rejected support agent request for ${type.toUpperCase()} access.`, 'warning');
       }
     },
-    [pendingConsentRequest, addAuditLog, startCameraSession, startAudioSession, currentLocalDeviceId]
+    [pendingConsentRequest, startCameraSession, startAudioSession, addAuditLog]
   );
 
   const resetAll = useCallback(() => {
-    localStorage.removeItem(STORAGE_KEY + '_devices');
-    localStorage.removeItem(STORAGE_KEY + '_media');
-    localStorage.removeItem(STORAGE_KEY + '_files');
-    localStorage.removeItem(STORAGE_KEY + '_logs');
-    localStorage.removeItem(STORAGE_KEY + '_auth');
-    localStorage.removeItem(STORAGE_KEY + '_user_auth');
-    setMediaItems(INITIAL_MEDIA_ITEMS);
-    setFiles(INITIAL_FILES);
-    setAuditLogs(INITIAL_AUDIT_LOGS);
-    setIsAuthenticated(false);
-    setClientScreen('welcome');
-    setActiveSession(null);
-    setPendingConsentRequest(null);
+    localStorage.clear();
+    window.location.reload();
   }, []);
 
-  // Detect if any OTHER device (such as a mobile tester phone) is actively connected
+  const selectedAdminDevice =
+    allDevices.find((d) => d.deviceId === selectedAdminDeviceId) || allDevices[0];
+
   const activeMobileDevice =
     allDevices.find(
       (d) =>
         d.deviceId !== currentLocalDeviceId &&
-        d.connectionStatus === 'connected'
+        d.connectionStatus === 'connected' &&
+        (d.deviceId.includes('mob') || /Android|iPhone|iPad/i.test(d.deviceModel || ''))
     ) || null;
-
-  const selectedAdminDevice =
-    allDevices.find((d) => d.deviceId === selectedAdminDeviceId) ||
-    activeMobileDevice ||
-    allDevices[0];
 
   return (
     <SupportContext.Provider
@@ -864,49 +959,45 @@ export const SupportProvider: React.FC<{ children: React.ReactNode }> = ({ child
         setClientScreen,
         isPhoneFrame,
         setIsPhoneFrame,
-
         device: currentClientDevice,
         mediaItems,
         files,
         auditLogs,
         isAuthenticated,
         userAuthInfo,
-
+        firebaseUser,
+        userProfile,
+        isAdminUser,
         activeSession,
         pendingConsentRequest,
         isManagePermissionsOpen,
         setIsManagePermissionsOpen,
-
         updatePermission,
         requestPermissionFromOS,
         login,
+        loginAdmin,
         logout,
         toggleDeviceConnection,
-
         addMediaItem,
         addFileItem,
         removeMediaItem,
         removeFileItem,
-
         startCameraSession,
         startAudioSession,
         endSession,
         adminRequestRemoteAccess,
         respondToConsentRequest,
-
         allDevices,
+        allUsers,
         selectedAdminDevice,
         setSelectedAdminDeviceId,
-
         isCloudSynced,
         activeMobileDevice,
         currentLocalDeviceId,
-
         customerDetails,
         submitCustomerDetails,
         isQrModalOpen,
         setIsQrModalOpen,
-
         addAuditLog,
         resetAll,
       }}
