@@ -1,0 +1,9 @@
+{
+  "name": "KDC Support",
+  "description": "Modern, secure, consent-based Android remote-support application and authorized dashboard.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone"
+  ],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
