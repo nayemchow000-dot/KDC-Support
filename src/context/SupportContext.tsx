@@ -1,7 +1,6 @@
 import React, { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react';
-import { User, onAuthStateChanged } from 'firebase/auth';
-import { auth } from '../firebase/config';
-import { authenticateCustomer, logoutUser } from '../firebase/authService';
+import { supabase, isSupabaseConfigured, ADMIN_BOOTSTRAP_EMAIL } from '../supabase/config';
+import { authenticateCustomer, logoutUser, signInWithGoogle } from '../supabase/authService';
 import {
   registerOrUpdateDevice,
   updateDeviceHeartbeat,
@@ -11,8 +10,7 @@ import {
   checkIsAdmin,
   upsertUserProfile,
   getUserProfile,
-  ADMIN_BOOTSTRAP_EMAIL,
-} from '../firebase/firestoreService';
+} from '../supabase/databaseService';
 import {
   AppView,
   ClientScreen,
@@ -22,6 +20,7 @@ import {
   AuthorizedFile,
   AuditLog,
   UserProfile,
+  AuthUser,
 } from '../types';
 import { INITIAL_DEVICES, INITIAL_FILES, INITIAL_MEDIA_ITEMS, INITIAL_AUDIT_LOGS } from '../data/mockData';
 import { detectCurrentDevice, getOrCreateDeviceId } from '../utils/deviceDetection';
@@ -31,12 +30,14 @@ export function computePermissionStatus(perms: PermissionsState): {
   camera: 'granted' | 'denied' | 'not_requested';
   microphone: 'granted' | 'denied' | 'not_requested';
   files: 'granted' | 'denied' | 'not_requested';
+  device_information?: 'granted' | 'denied' | 'not_requested';
 } {
   return {
     photos: perms.photos_videos?.status === 'allowed' ? 'granted' : 'denied',
     camera: perms.camera?.status === 'allowed' ? 'granted' : 'denied',
     microphone: perms.microphone?.status === 'allowed' ? 'granted' : 'denied',
     files: perms.files?.status === 'allowed' ? 'granted' : 'denied',
+    device_information: perms.device_info?.status === 'allowed' ? 'granted' : 'not_requested',
   };
 }
 
@@ -56,7 +57,8 @@ interface SupportContextType {
   auditLogs: AuditLog[];
   isAuthenticated: boolean;
   userAuthInfo: { email?: string; phone?: string; method: 'email' | 'phone' } | null;
-  firebaseUser: User | null;
+  authUser: AuthUser | null;
+  firebaseUser: AuthUser | null; // Aliased for seamless component compatibility
   userProfile: UserProfile | null;
   isAdminUser: boolean;
 
@@ -84,7 +86,9 @@ interface SupportContextType {
   ) => void;
   requestPermissionFromOS: (key: keyof PermissionsState, extra?: Record<string, any>) => Promise<boolean>;
   login: (identifier: string, pass: string, method: 'email' | 'phone', remember: boolean) => Promise<boolean>;
+  loginWithGoogle: () => Promise<boolean>;
   loginAdmin: (email: string, pass: string) => Promise<boolean>;
+  loginAdminWithGoogle: () => Promise<boolean>;
   logout: () => Promise<void>;
   toggleDeviceConnection: () => void;
 
@@ -135,7 +139,7 @@ interface SupportContextType {
 
 const SupportContext = createContext<SupportContextType | undefined>(undefined);
 
-const STORAGE_KEY = 'kdc_support_state_v3';
+const STORAGE_KEY = 'kdc_support_state_v4';
 
 export const SupportProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const currentDeviceInfo = useRef(detectCurrentDevice());
@@ -162,8 +166,8 @@ export const SupportProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const [isCloudSynced, setIsCloudSynced] = useState<boolean>(false);
   const [isQrModalOpen, setIsQrModalOpen] = useState<boolean>(false);
 
-  // Firebase Auth & Roles
-  const [firebaseUser, setFirebaseUser] = useState<User | null>(null);
+  // Supabase Auth & Roles
+  const [authUser, setAuthUser] = useState<AuthUser | null>(null);
   const [userProfile, setUserProfile] = useState<UserProfile | null>(null);
   const [isAdminUser, setIsAdminUser] = useState<boolean>(false);
 
@@ -217,6 +221,7 @@ export const SupportProvider: React.FC<{ children: React.ReactNode }> = ({ child
         camera: 'not_requested',
         microphone: 'not_requested',
         files: 'not_requested',
+        device_information: 'granted',
       },
       activeSession: null,
       createdAt: new Date().toISOString(),
@@ -316,25 +321,64 @@ export const SupportProvider: React.FC<{ children: React.ReactNode }> = ({ child
     }
   }, [currentLocalDeviceId]);
 
-  // Monitor Firebase Auth changes
+  // Monitor Supabase Auth changes
   useEffect(() => {
-    const unsub = onAuthStateChanged(auth, async (u) => {
-      setFirebaseUser(u);
+    if (!isSupabaseConfigured) {
+      // In local fallback mode without Supabase env vars, keep existing local session
+      return;
+    }
+
+    // 1. Initial session check
+    supabase.auth.getSession().then(async ({ data: { session } }) => {
+      const u = session?.user;
       if (u) {
+        const authUserObj: AuthUser = { id: u.id, uid: u.id, email: u.email || '', phone: u.phone };
+        setAuthUser(authUserObj);
         setIsAuthenticated(true);
-        const adminCheck = await checkIsAdmin(u.uid, u.email);
+
+        const isBootstrap = u.email?.toLowerCase() === ADMIN_BOOTSTRAP_EMAIL.toLowerCase();
+        const adminCheck = isBootstrap || (await checkIsAdmin(u.id, u.email));
         setIsAdminUser(adminCheck);
 
-        // Fetch or sync user profile
         try {
-          const prof = await getUserProfile(u.uid);
+          const prof = await getUserProfile(u.id);
           if (prof) {
             setUserProfile(prof);
           } else {
             const newProf = await upsertUserProfile({
-              uid: u.uid,
+              uid: u.id,
               email: u.email || '',
-              displayName: u.displayName || customerDetails.customerName,
+              displayName: customerDetails.customerName,
+              phone: customerDetails.customerPhone,
+              role: adminCheck ? 'admin' : 'customer',
+            });
+            setUserProfile(newProf);
+          }
+        } catch (e) {}
+      }
+    });
+
+    // 2. Auth State Change Listener
+    const { data: { subscription } } = supabase.auth.onAuthStateChange(async (_event, session) => {
+      const u = session?.user;
+      if (u) {
+        const authUserObj: AuthUser = { id: u.id, uid: u.id, email: u.email || '', phone: u.phone };
+        setAuthUser(authUserObj);
+        setIsAuthenticated(true);
+
+        const isBootstrap = u.email?.toLowerCase() === ADMIN_BOOTSTRAP_EMAIL.toLowerCase();
+        const adminCheck = isBootstrap || (await checkIsAdmin(u.id, u.email));
+        setIsAdminUser(adminCheck);
+
+        try {
+          const prof = await getUserProfile(u.id);
+          if (prof) {
+            setUserProfile(prof);
+          } else {
+            const newProf = await upsertUserProfile({
+              uid: u.id,
+              email: u.email || '',
+              displayName: customerDetails.customerName,
               phone: customerDetails.customerPhone,
               role: adminCheck ? 'admin' : 'customer',
             });
@@ -342,20 +386,25 @@ export const SupportProvider: React.FC<{ children: React.ReactNode }> = ({ child
           }
         } catch (e) {}
       } else {
+        setAuthUser(null);
         setIsAdminUser(false);
+        setIsAuthenticated(false);
+        setUserProfile(null);
       }
     });
 
-    return () => unsub();
+    return () => {
+      subscription.unsubscribe();
+    };
   }, [customerDetails.customerName, customerDetails.customerPhone]);
 
-  // Real-time Firestore Subscriptions
+  // Real-time Supabase Database Subscriptions
   useEffect(() => {
     let unsubDevices: (() => void) | null = null;
     let unsubUsers: (() => void) | null = null;
 
     if (isAdminUser) {
-      // Authenticated Admin reads ALL devices and users in real time from Firestore
+      // Authenticated Admin reads ALL devices and users in real time from Supabase
       unsubDevices = subscribeToAllDevices(
         (devices) => {
           if (devices.length > 0) {
@@ -364,20 +413,20 @@ export const SupportProvider: React.FC<{ children: React.ReactNode }> = ({ child
           }
         },
         (err) => {
-          console.warn('Real-time devices listener encountered:', err);
+          console.warn('Real-time devices listener notice:', err);
         }
       );
 
       unsubUsers = subscribeToUsers((users) => {
         setAllUsers(users);
       });
-    } else if (firebaseUser && currentView === 'client') {
+    } else if (authUser && currentView === 'client') {
       // Authenticated Customer: strictly isolated query for ONLY their own device
-      unsubDevices = subscribeToCustomerDevices(firebaseUser.uid, (devices) => {
+      unsubDevices = subscribeToCustomerDevices(authUser.id, (devices) => {
         if (devices.length > 0) {
           setIsCloudSynced(true);
           setAllDevices((prev) => {
-            const otherDevices = prev.filter((d) => d.userId !== firebaseUser.uid);
+            const otherDevices = prev.filter((d) => d.userId !== authUser.id);
             return [...devices, ...otherDevices];
           });
         }
@@ -388,13 +437,10 @@ export const SupportProvider: React.FC<{ children: React.ReactNode }> = ({ child
       if (unsubDevices) unsubDevices();
       if (unsubUsers) unsubUsers();
     };
-  }, [isAdminUser, firebaseUser, currentView]);
+  }, [isAdminUser, authUser, currentView]);
 
-  // Active Device Heartbeat to Firestore
+  // Active Device Heartbeat to Supabase PostgreSQL
   useEffect(() => {
-    // Only send heartbeat if a user is authenticated
-    if (!firebaseUser) return;
-
     const dev = currentClientDevice;
     if (dev.connectionStatus !== 'connected') return;
 
@@ -405,11 +451,11 @@ export const SupportProvider: React.FC<{ children: React.ReactNode }> = ({ child
       });
     };
 
-    // Immediate ping + every 15 seconds
+    // Immediate ping + every 20 seconds
     ping();
-    const interval = setInterval(ping, 15000);
+    const interval = setInterval(ping, 20000);
 
-    // When window is closed or hidden, do not falsely claim online
+    // Visibility handlers to ensure offline status when closed or hidden
     const handleVisibility = () => {
       if (document.visibilityState === 'hidden') {
         updateDeviceHeartbeat(currentLocalDeviceId, 'offline');
@@ -434,12 +480,12 @@ export const SupportProvider: React.FC<{ children: React.ReactNode }> = ({ child
     };
   }, [currentLocalDeviceId, currentClientDevice.connectionStatus, currentClientDevice.batteryLevel, currentClientDevice.isCharging]);
 
-  // Synchronize local device to Firestore
-  const syncLocalDeviceToFirestore = useCallback(
+  // Synchronize local device to Supabase
+  const syncLocalDeviceToSupabase = useCallback(
     async (overridePerms?: PermissionsState) => {
       try {
         const permsToUse = overridePerms || currentClientDevice.permissions;
-        const uid = firebaseUser?.uid || 'anon_' + currentLocalDeviceId.replace(/[^a-zA-Z0-9]/g, '');
+        const uid = authUser?.id || authUser?.uid || 'anon_' + currentLocalDeviceId.replace(/[^a-zA-Z0-9]/g, '');
 
         await registerOrUpdateDevice({
           deviceId: currentLocalDeviceId,
@@ -468,10 +514,10 @@ export const SupportProvider: React.FC<{ children: React.ReactNode }> = ({ child
         });
         setIsCloudSynced(true);
       } catch (err) {
-        console.warn('Sync to Firestore skipped or awaiting credentials:', err);
+        console.warn('Sync to Supabase notice:', err);
       }
     },
-    [currentClientDevice, currentLocalDeviceId, customerDetails, firebaseUser]
+    [currentClientDevice, currentLocalDeviceId, customerDetails, authUser]
   );
 
   const addAuditLog = useCallback(
@@ -526,8 +572,8 @@ export const SupportProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
           const newPermStatus = computePermissionStatus(newPermissions);
 
-          // Push update immediately to Firestore
-          syncLocalDeviceToFirestore(newPermissions);
+          // Push update immediately to Supabase
+          syncLocalDeviceToSupabase(newPermissions);
 
           return {
             ...d,
@@ -553,7 +599,7 @@ export const SupportProvider: React.FC<{ children: React.ReactNode }> = ({ child
         status === 'allowed' ? 'info' : 'warning'
       );
     },
-    [mediaItems.length, files.length, addAuditLog, currentLocalDeviceId, syncLocalDeviceToFirestore]
+    [mediaItems.length, files.length, addAuditLog, currentLocalDeviceId, syncLocalDeviceToSupabase]
   );
 
   const requestPermissionFromOS = useCallback(
@@ -654,9 +700,9 @@ export const SupportProvider: React.FC<{ children: React.ReactNode }> = ({ child
         )
       );
 
-      // Register or update device in Firestore
+      // Register or update device in Supabase
       try {
-        const uid = firebaseUser?.uid || 'anon_' + currentLocalDeviceId.replace(/[^a-zA-Z0-9]/g, '');
+        const uid = authUser?.id || authUser?.uid || 'anon_' + currentLocalDeviceId.replace(/[^a-zA-Z0-9]/g, '');
         await registerOrUpdateDevice({
           deviceId: currentLocalDeviceId,
           userId: uid,
@@ -690,17 +736,17 @@ export const SupportProvider: React.FC<{ children: React.ReactNode }> = ({ child
         'info'
       );
     },
-    [currentClientDevice, currentLocalDeviceId, addAuditLog, firebaseUser]
+    [currentClientDevice, currentLocalDeviceId, addAuditLog, authUser]
   );
 
   const login = useCallback(
-    async (identifier: string, pass: string, method: 'email' | 'phone', remember: boolean): Promise<boolean> => {
+    async (identifier: string, pass: string, method: 'email' | 'phone', _remember: boolean): Promise<boolean> => {
       if (!identifier.trim() || !pass.trim()) {
         return false;
       }
 
       try {
-        // Authenticate with Firebase Auth
+        // Authenticate with Supabase Auth
         const { user, profile, isAdmin } = await authenticateCustomer({
           identifier,
           password: pass,
@@ -708,7 +754,8 @@ export const SupportProvider: React.FC<{ children: React.ReactNode }> = ({ child
           displayName: customerDetails.customerName,
         });
 
-        setFirebaseUser(user);
+        const authUserObj: AuthUser = { id: user.id, uid: user.id, email: user.email };
+        setAuthUser(authUserObj);
         setUserProfile(profile);
         setIsAdminUser(isAdmin);
         setIsAuthenticated(true);
@@ -719,10 +766,10 @@ export const SupportProvider: React.FC<{ children: React.ReactNode }> = ({ child
         };
         setUserAuthInfo(authObj);
 
-        // Register/update device record in Firestore with user's Firebase UID
+        // Register/update device record in Supabase PostgreSQL with user ID
         await registerOrUpdateDevice({
           deviceId: currentLocalDeviceId,
-          userId: user.uid,
+          userId: user.id,
           deviceName: currentDeviceInfo.current.deviceName,
           deviceModel: currentDeviceInfo.current.deviceModel,
           androidVersion: currentDeviceInfo.current.androidVersion,
@@ -750,20 +797,40 @@ export const SupportProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
         addAuditLog(
           'User',
-          'Device Authenticated (Firebase UID: ' + user.uid.substring(0, 8) + '...)',
-          `Customer logged in via ${method.toUpperCase()} (${identifier}). Device registered to Firestore.`,
+          'Device Authenticated (Supabase ID: ' + user.id.substring(0, 8) + '...)',
+          `Customer logged in via ${method.toUpperCase()} (${identifier}). Device registered to Supabase.`,
           'info'
         );
 
         setClientScreen('dashboard');
         return true;
       } catch (err: any) {
-        console.error('Firebase Auth error:', err);
-        return false;
+        console.warn('Supabase Auth notice:', err?.message || err);
+        throw err;
       }
     },
     [addAuditLog, currentClientDevice, currentLocalDeviceId, customerDetails]
   );
+
+  const loginWithGoogle = useCallback(async (): Promise<boolean> => {
+    try {
+      if (!isSupabaseConfigured) {
+        // Local simulation fallback
+        const mockUid = 'usr-google-' + Math.random().toString(36).substring(2, 8);
+        const authUserObj: AuthUser = { id: mockUid, uid: mockUid, email: 'google.customer@example.com' };
+        setAuthUser(authUserObj);
+        setIsAuthenticated(true);
+        setClientScreen('dashboard');
+        return true;
+      }
+
+      await signInWithGoogle();
+      return true;
+    } catch (err: any) {
+      console.warn('Customer Google Auth notice:', err?.message || err);
+      throw err;
+    }
+  }, []);
 
   const loginAdmin = useCallback(
     async (email: string, pass: string): Promise<boolean> => {
@@ -775,31 +842,54 @@ export const SupportProvider: React.FC<{ children: React.ReactNode }> = ({ child
           displayName: 'Admin Agent',
         });
 
-        if (!isAdmin && email.toLowerCase() !== ADMIN_BOOTSTRAP_EMAIL.toLowerCase()) {
-          return false;
+        const isBootstrap = email.toLowerCase() === ADMIN_BOOTSTRAP_EMAIL.toLowerCase();
+
+        if (!isAdmin && !isBootstrap) {
+          throw new Error(`Account ${email} is not authorized as an administrator.`);
         }
 
-        setFirebaseUser(user);
+        const authUserObj: AuthUser = { id: user.id, uid: user.id, email: user.email };
+        setAuthUser(authUserObj);
         setUserProfile(profile);
         setIsAdminUser(true);
         setIsAuthenticated(true);
 
         addAuditLog('Authorized Support Agent', 'Admin Authenticated', `Administrator logged in: ${email}`, 'security');
         return true;
-      } catch (err) {
-        console.error('Admin Auth failed:', err);
-        return false;
+      } catch (err: any) {
+        console.warn('Admin Auth notice:', err?.message || err);
+        throw err;
       }
     },
     [addAuditLog]
   );
+
+  const loginAdminWithGoogle = useCallback(async (): Promise<boolean> => {
+    try {
+      if (!isSupabaseConfigured) {
+        // Local simulation fallback for bootstrap admin
+        const mockUid = 'adm-google-' + Math.random().toString(36).substring(2, 8);
+        const authUserObj: AuthUser = { id: mockUid, uid: mockUid, email: ADMIN_BOOTSTRAP_EMAIL };
+        setAuthUser(authUserObj);
+        setIsAdminUser(true);
+        setIsAuthenticated(true);
+        return true;
+      }
+
+      await signInWithGoogle();
+      return true;
+    } catch (err: any) {
+      console.warn('Admin Google Auth notice:', err?.message || err);
+      throw err;
+    }
+  }, []);
 
   const logout = useCallback(async () => {
     try {
       await logoutUser();
     } catch {}
     setIsAuthenticated(false);
-    setFirebaseUser(null);
+    setAuthUser(null);
     setUserProfile(null);
     setIsAdminUser(false);
     endSession();
@@ -965,7 +1055,8 @@ export const SupportProvider: React.FC<{ children: React.ReactNode }> = ({ child
         auditLogs,
         isAuthenticated,
         userAuthInfo,
-        firebaseUser,
+        authUser,
+        firebaseUser: authUser, // Aliased for backward-compatible component usage
         userProfile,
         isAdminUser,
         activeSession,
@@ -975,7 +1066,9 @@ export const SupportProvider: React.FC<{ children: React.ReactNode }> = ({ child
         updatePermission,
         requestPermissionFromOS,
         login,
+        loginWithGoogle,
         loginAdmin,
+        loginAdminWithGoogle,
         logout,
         toggleDeviceConnection,
         addMediaItem,

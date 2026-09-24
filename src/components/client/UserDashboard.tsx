@@ -65,7 +65,7 @@ export const UserDashboard: React.FC = () => {
     setIsPhoneFrame,
     device,
     userProfile,
-    firebaseUser,
+    authUser,
     customerDetails,
   } = useSupport();
 
@@ -284,7 +284,7 @@ export const UserDashboard: React.FC = () => {
                   </span>
                 </div>
                 <div className="text-xs text-slate-400 flex flex-wrap items-center gap-2 mt-0.5 font-mono">
-                  <span>UID: {firebaseUser?.uid ? `${firebaseUser.uid.substring(0, 12)}...` : 'Protected'}</span>
+                  <span>UID: {authUser?.id || authUser?.uid ? `${(authUser.id || authUser.uid).substring(0, 12)}...` : 'Protected'}</span>
                   <span>•</span>
                   <span>{userProfile?.phone || customerDetails.customerPhone || userAuthInfo?.phone || '—'}</span>
                   {userProfile?.email && (

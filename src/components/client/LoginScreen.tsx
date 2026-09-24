@@ -15,7 +15,7 @@ import {
 } from 'lucide-react';
 
 export const LoginScreen: React.FC = () => {
-  const { login, setClientScreen, device, customerDetails } = useSupport();
+  const { login, loginWithGoogle, setClientScreen, device, customerDetails } = useSupport();
 
   const [authMethod, setAuthMethod] = useState<'email' | 'phone'>('phone');
   const [emailInput, setEmailInput] = useState(customerDetails.customerEmail || 'nayemchow000@gmail.com');
@@ -27,8 +27,21 @@ export const LoginScreen: React.FC = () => {
   const [forgotPasswordOpen, setForgotPasswordOpen] = useState(false);
   const [forgotSubmitted, setForgotSubmitted] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
+  const [isGoogleLoading, setIsGoogleLoading] = useState(false);
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleGoogleSignIn = async () => {
+    setErrorMsg(null);
+    setIsGoogleLoading(true);
+    try {
+      await loginWithGoogle();
+    } catch (err: any) {
+      setErrorMsg(err.message || 'Google authentication failed. Please try again.');
+    } finally {
+      setIsGoogleLoading(false);
+    }
+  };
+
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMsg(null);
 
@@ -43,13 +56,16 @@ export const LoginScreen: React.FC = () => {
     }
 
     setIsLoading(true);
-    setTimeout(() => {
-      setIsLoading(false);
-      const success = login(identifier, password, authMethod, rememberDevice);
+    try {
+      const success = await login(identifier, password, authMethod, rememberDevice);
       if (!success) {
         setErrorMsg('Authentication failed. Please verify your credentials.');
       }
-    }, 350);
+    } catch (err: any) {
+      setErrorMsg(err.message || 'Authentication failed. Please verify your credentials.');
+    } finally {
+      setIsLoading(false);
+    }
   };
 
   const handleQuickFill = (type: 'phone' | 'email') => {
@@ -95,8 +111,60 @@ export const LoginScreen: React.FC = () => {
           </p>
         </div>
 
+        {/* Error Notification */}
+        {errorMsg && (
+          <div className="mb-4 p-3 rounded-xl bg-rose-950/70 border border-rose-800 text-rose-200 text-xs flex items-start gap-2.5 animate-in fade-in">
+            <AlertCircle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+            <div className="flex-1 leading-relaxed">{errorMsg}</div>
+          </div>
+        )}
+
+        {/* 1-Tap Google Sign-In */}
+        <div className="mb-4">
+          <button
+            type="button"
+            onClick={handleGoogleSignIn}
+            disabled={isGoogleLoading || isLoading}
+            className="w-full py-2.5 px-3 rounded-xl bg-white hover:bg-slate-100 text-slate-900 font-semibold text-xs shadow-md flex items-center justify-center gap-2.5 transition-all active:scale-[0.99] disabled:opacity-60"
+          >
+            {isGoogleLoading ? (
+              <span>Connecting with Google...</span>
+            ) : (
+              <>
+                <svg className="w-4 h-4" viewBox="0 0 24 24">
+                  <path
+                    fill="#4285F4"
+                    d="M23.745 12.27c0-.7-.06-1.4-.19-2.07H12v4.51h6.6c-.29 1.52-1.14 2.82-2.4 3.68v3.05h3.88c2.27-2.09 3.66-5.17 3.66-9.17z"
+                  />
+                  <path
+                    fill="#34A853"
+                    d="M12 24c3.24 0 5.95-1.08 7.93-2.91l-3.88-3.05c-1.08.72-2.45 1.16-4.05 1.16-3.12 0-5.77-2.1-6.72-4.93H1.25v3.15C3.26 21.36 7.33 24 12 24z"
+                  />
+                  <path
+                    fill="#FBBC05"
+                    d="M5.28 14.27c-.25-.72-.38-1.49-.38-2.27s.13-1.55.38-2.27V6.58H1.25C.45 8.16 0 9.98 0 12c0 2.02.45 3.84 1.25 5.42l4.03-3.15z"
+                  />
+                  <path
+                    fill="#EA4335"
+                    d="M12 4.75c1.77 0 3.35.61 4.6 1.8l3.42-3.42C17.95 1.19 15.24 0 12 0 7.33 0 3.26 2.64 1.25 6.58l4.03 3.15c.95-2.83 3.6-4.98 6.72-4.98z"
+                  />
+                </svg>
+                <span>Continue with Google</span>
+              </>
+            )}
+          </button>
+        </div>
+
+        <div className="relative flex items-center justify-center my-3.5">
+          <div className="border-t border-slate-800 w-full" />
+          <span className="bg-slate-950 px-2.5 text-[10px] text-slate-500 uppercase tracking-wider shrink-0">
+            or with credentials
+          </span>
+          <div className="border-t border-slate-800 w-full" />
+        </div>
+
         {/* Option Tabs: Email vs Phone */}
-        <div className="grid grid-cols-2 p-1 bg-slate-900 rounded-xl border border-slate-800 mb-5">
+        <div className="grid grid-cols-2 p-1 bg-slate-900 rounded-xl border border-slate-800 mb-4">
           <button
             type="button"
             onClick={() => {
@@ -129,14 +197,6 @@ export const LoginScreen: React.FC = () => {
             <span>Phone Number</span>
           </button>
         </div>
-
-        {/* Error Notification */}
-        {errorMsg && (
-          <div className="mb-4 p-3 rounded-xl bg-rose-950/70 border border-rose-800 text-rose-200 text-xs flex items-center gap-2.5 animate-in fade-in">
-            <AlertCircle className="w-4 h-4 text-rose-400 shrink-0" />
-            <span>{errorMsg}</span>
-          </div>
-        )}
 
         {/* Form */}
         <form onSubmit={handleSubmit} className="space-y-4">

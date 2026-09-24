@@ -56,24 +56,25 @@ export const AdminDashboard: React.FC = () => {
     activeMobileDevice,
   } = useSupport();
 
-  const [viewMode, setViewMode] = useState<'table' | 'command_center'>('table');
+  const [viewMode, setViewMode] = useState<'table' | 'customers' | 'command_center'>('table');
+  const [heartbeatTimeoutSec, setHeartbeatTimeoutSec] = useState<number>(120);
   const [customerLinkCopied, setCustomerLinkCopied] = useState(false);
   const [deviceSearch, setDeviceSearch] = useState('');
   const [filterStatus, setFilterStatus] = useState<'all' | 'connected' | 'offline'>('all');
   const [adminTab, setAdminTab] = useState<'overview' | 'media' | 'files' | 'telemetry' | 'audit'>('overview');
   const [requestNotification, setRequestNotification] = useState<string | null>(null);
 
-  const device = selectedAdminDevice;
-  const isSelectedConnected = device.connectionStatus === 'connected';
-  const perms = device.permissions;
-
-  // Real-time heartbeat validation: consider offline if no heartbeat in 60s
+  // Real-time heartbeat validation: configurable timeout (defaults to 120s / 2 minutes per requirements)
   const now = Date.now();
   const isDeviceTrulyOnline = (d: DeviceRecord) => {
     if (d.connectionStatus !== 'connected') return false;
     const lastSeenMs = new Date(d.lastSeen).getTime();
-    return !isNaN(lastSeenMs) && now - lastSeenMs < 60000;
+    return !isNaN(lastSeenMs) && now - lastSeenMs < heartbeatTimeoutSec * 1000;
   };
+
+  const device = selectedAdminDevice;
+  const isSelectedConnected = isDeviceTrulyOnline(device);
+  const perms = device.permissions;
 
   // 5 Required Real Metrics
   const totalCustomers =
@@ -179,8 +180,8 @@ export const AdminDashboard: React.FC = () => {
       </div>
 
       {/* View Mode Switcher */}
-      <div className="flex items-center justify-between mb-4">
-        <div className="flex items-center gap-2">
+      <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
+        <div className="flex flex-wrap items-center gap-2">
           <button
             onClick={() => setViewMode('table')}
             className={`px-3.5 py-2 rounded-xl text-xs font-semibold flex items-center gap-2 transition-all ${
@@ -189,10 +190,25 @@ export const AdminDashboard: React.FC = () => {
                 : 'bg-slate-900 text-slate-400 hover:text-white border border-slate-800'
             }`}
           >
-            <Users className="w-3.5 h-3.5" />
-            <span>Customer & Device Directory Table</span>
+            <Smartphone className="w-3.5 h-3.5" />
+            <span>Devices Table</span>
             <span className="px-1.5 py-0.5 rounded-full bg-slate-950 text-slate-200 text-[10px] font-mono">
               {allDevices.length}
+            </span>
+          </button>
+
+          <button
+            onClick={() => setViewMode('customers')}
+            className={`px-3.5 py-2 rounded-xl text-xs font-semibold flex items-center gap-2 transition-all ${
+              viewMode === 'customers'
+                ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-600/30'
+                : 'bg-slate-900 text-slate-400 hover:text-white border border-slate-800'
+            }`}
+          >
+            <Users className="w-3.5 h-3.5" />
+            <span>Customers Table</span>
+            <span className="px-1.5 py-0.5 rounded-full bg-slate-950 text-slate-200 text-[10px] font-mono">
+              {totalCustomers}
             </span>
           </button>
 
@@ -204,7 +220,7 @@ export const AdminDashboard: React.FC = () => {
                 : 'bg-slate-900 text-slate-400 hover:text-white border border-slate-800'
             }`}
           >
-            <Smartphone className="w-3.5 h-3.5" />
+            <Radio className="w-3.5 h-3.5" />
             <span>Device Command Center ({device.deviceName})</span>
           </button>
         </div>
@@ -220,21 +236,145 @@ export const AdminDashboard: React.FC = () => {
         )}
       </div>
 
+      {/* Customer Directory Table View */}
+      {viewMode === 'customers' && (
+        <div className="bg-slate-900 border border-slate-800 rounded-3xl p-5 mb-6 shadow-xl flex-1 flex flex-col">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-4 pb-3 border-b border-slate-800">
+            <div>
+              <h2 className="text-base font-bold text-white flex items-center gap-2">
+                <Users className="w-4 h-4 text-cyan-400" />
+                Customer Directory Table (Supabase Profiles)
+              </h2>
+              <p className="text-xs text-slate-400 mt-0.5">
+                Authenticated user profiles stored in Supabase PostgreSQL public.profiles.
+              </p>
+            </div>
+            <div className="text-xs text-slate-400 font-mono">
+              Total Enrolled Customers: <span className="text-cyan-400 font-bold">{totalCustomers}</span>
+            </div>
+          </div>
+
+          <div className="overflow-x-auto flex-1">
+            <table className="w-full text-left text-xs border-collapse">
+              <thead>
+                <tr className="border-b border-slate-800 text-[11px] font-mono uppercase text-slate-400">
+                  <th className="py-3 px-3">Name</th>
+                  <th className="py-3 px-3">Email</th>
+                  <th className="py-3 px-3">Phone</th>
+                  <th className="py-3 px-3">User ID</th>
+                  <th className="py-3 px-3">Role</th>
+                  <th className="py-3 px-3">Created At</th>
+                  <th className="py-3 px-3">Last Login</th>
+                  <th className="py-3 px-3 text-right">Devices</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-800/60">
+                {allUsers && allUsers.length > 0 ? (
+                  allUsers.map((u) => {
+                    const userDevices = allDevices.filter((d) => d.userId === u.uid || d.userEmail === u.email);
+                    return (
+                      <tr key={u.uid} className="hover:bg-slate-800/50 transition-colors">
+                        <td className="py-3 px-3">
+                          <div className="font-semibold text-white">{u.displayName || 'Customer'}</div>
+                        </td>
+                        <td className="py-3 px-3 text-slate-300 font-mono text-[11px]">{u.email || '—'}</td>
+                        <td className="py-3 px-3 text-slate-300 font-mono text-[11px]">{u.phone || '—'}</td>
+                        <td className="py-3 px-3 text-slate-400 font-mono text-[10px]">
+                          {u.uid ? `${u.uid.substring(0, 12)}...` : '—'}
+                        </td>
+                        <td className="py-3 px-3">
+                          <span
+                            className={`px-2 py-0.5 rounded-full text-[10px] font-mono uppercase font-semibold ${
+                              u.role === 'admin'
+                                ? 'bg-indigo-950 text-indigo-300 border border-indigo-800'
+                                : 'bg-emerald-950 text-emerald-300 border border-emerald-800'
+                            }`}
+                          >
+                            {u.role}
+                          </span>
+                        </td>
+                        <td className="py-3 px-3 text-slate-400 font-mono text-[10px]">
+                          {new Date(u.createdAt).toLocaleDateString()}
+                        </td>
+                        <td className="py-3 px-3 text-slate-300 font-mono text-[10px]">
+                          {new Date(u.lastLoginAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                        </td>
+                        <td className="py-3 px-3 text-right">
+                          <span className="px-2 py-0.5 rounded bg-slate-950 border border-slate-800 font-mono text-[11px] text-cyan-400">
+                            {userDevices.length} device{userDevices.length === 1 ? '' : 's'}
+                          </span>
+                        </td>
+                      </tr>
+                    );
+                  })
+                ) : (
+                  // Derived customers from devices list if profiles table is loading
+                  allDevices.map((d) => (
+                    <tr key={d.deviceId} className="hover:bg-slate-800/50 transition-colors">
+                      <td className="py-3 px-3">
+                        <div className="font-semibold text-white">{d.userName || d.submittedDetails?.customerName || 'Customer'}</div>
+                      </td>
+                      <td className="py-3 px-3 text-slate-300 font-mono text-[11px]">{d.userEmail || d.submittedDetails?.customerEmail || '—'}</td>
+                      <td className="py-3 px-3 text-slate-300 font-mono text-[11px]">{d.userPhone || d.submittedDetails?.customerPhone || '—'}</td>
+                      <td className="py-3 px-3 text-slate-400 font-mono text-[10px]">
+                        {d.userId ? `${d.userId.substring(0, 12)}...` : 'pending'}
+                      </td>
+                      <td className="py-3 px-3">
+                        <span className="px-2 py-0.5 rounded-full text-[10px] font-mono bg-emerald-950 text-emerald-300 border border-emerald-800">
+                          customer
+                        </span>
+                      </td>
+                      <td className="py-3 px-3 text-slate-400 font-mono text-[10px]">
+                        {new Date(d.createdAt).toLocaleDateString()}
+                      </td>
+                      <td className="py-3 px-3 text-slate-300 font-mono text-[10px]">
+                        {new Date(d.lastSeen).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                      </td>
+                      <td className="py-3 px-3 text-right">
+                        <span className="px-2 py-0.5 rounded bg-slate-950 border border-slate-800 font-mono text-[11px] text-cyan-400">
+                          {d.deviceName}
+                        </span>
+                      </td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
       {/* Customer & Device Directory Table View */}
       {viewMode === 'table' && (
         <div className="bg-slate-900 border border-slate-800 rounded-3xl p-5 mb-6 shadow-xl flex-1 flex flex-col">
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-4 pb-3 border-b border-slate-800">
             <div>
               <h2 className="text-base font-bold text-white flex items-center gap-2">
-                <Users className="w-4 h-4 text-cyan-400" />
+                <Smartphone className="w-4 h-4 text-cyan-400" />
                 Customer & Registered Device Table
               </h2>
               <p className="text-xs text-slate-400 mt-0.5">
-                Real-time Firestore records synced from client mobile devices and authenticated customers.
+                Real-time Supabase records synced from client mobile devices and authenticated customers.
               </p>
             </div>
 
-            <div className="flex items-center gap-3">
+            <div className="flex flex-wrap items-center gap-3">
+              {/* Heartbeat timeout selector */}
+              <div className="flex items-center gap-1.5 text-[11px] text-slate-400 bg-slate-950 px-2.5 py-1.5 rounded-xl border border-slate-800">
+                <Clock className="w-3.5 h-3.5 text-cyan-400" />
+                <span>Timeout:</span>
+                <select
+                  value={heartbeatTimeoutSec}
+                  onChange={(e) => setHeartbeatTimeoutSec(Number(e.target.value))}
+                  className="bg-transparent text-slate-200 font-mono text-[11px] focus:outline-none cursor-pointer"
+                  title="Configurable heartbeat timeout for online status"
+                >
+                  <option value={60} className="bg-slate-900 text-white">1 min</option>
+                  <option value={120} className="bg-slate-900 text-white">2 min (Standard)</option>
+                  <option value={300} className="bg-slate-900 text-white">5 min</option>
+                </select>
+              </div>
+
               <div className="relative">
                 <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-2.5" />
                 <input
@@ -553,7 +693,7 @@ export const AdminDashboard: React.FC = () => {
             <div className="space-y-2.5 overflow-y-auto flex-1 max-h-[600px] pr-1">
               {filteredDevices.map((d) => {
                 const isSelected = d.deviceId === device.deviceId;
-                const isConn = d.connectionStatus === 'connected';
+                const isConn = isDeviceTrulyOnline(d);
 
                 return (
                   <button

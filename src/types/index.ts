@@ -2,6 +2,13 @@ export type PermissionStatus = 'allowed' | 'not_allowed';
 export type PhotoScope = 'full' | 'selected' | 'none';
 export type UserRole = 'customer' | 'admin';
 
+export interface AuthUser {
+  id: string;
+  uid: string;
+  email?: string;
+  phone?: string;
+}
+
 export interface UserProfile {
   uid: string;
   email?: string;
@@ -59,6 +66,7 @@ export interface DeviceRecord {
     camera: 'granted' | 'denied' | 'not_requested';
     microphone: 'granted' | 'denied' | 'not_requested';
     files: 'granted' | 'denied' | 'not_requested';
+    device_information?: 'granted' | 'denied' | 'not_requested';
   };
   permissions: PermissionsState;
   activeSession: {

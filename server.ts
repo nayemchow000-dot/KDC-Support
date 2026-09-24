@@ -123,8 +123,8 @@ function markStaleDevices() {
   const now = Date.now();
   for (const [, dev] of devicesMap.entries()) {
     const lastSeenMs = new Date(dev.lastSeen).getTime();
-    // If not seen for more than 40 seconds, mark offline
-    if (now - lastSeenMs > 40000 && dev.connectionStatus !== 'offline') {
+    // If not seen for more than 2 minutes (120 seconds), mark offline per requirements
+    if (now - lastSeenMs > 120000 && dev.connectionStatus !== 'offline') {
       dev.connectionStatus = 'offline';
       dev.updatedAt = new Date().toISOString();
     }
